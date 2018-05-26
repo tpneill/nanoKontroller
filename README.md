@@ -5,6 +5,8 @@ A very simplistic Python app to turn the controllers on a Korg nanoKONTROL2 devi
 
 It is very specificially hard-coded for my setup but may be of use for others to modify.
 
+LED control will not work until the magic control sequence has been sent to the device. Use the Windows control software to switch to this mode.
+
 Features
 ========
 

@@ -1,0 +1,176 @@
+#!/usr/bin/python
+
+import argparse
+import time
+import mido
+import logging
+from evdev import uinput, ecodes as e
+from pulsectl import Pulse
+from gi.repository import Notify
+
+# Prefined direct button to keyboard mappings
+keymap = {
+	41: e.KEY_PLAYPAUSE,
+	43: e.KEY_PREVIOUSSONG,
+	44: e.KEY_NEXTSONG,
+	42: e.KEY_STOPCD,
+	45: e.KEY_RECORD
+}
+
+
+def getSinkByName(pactl, name):
+	"""Return a PulseAudio output sink object, searching for it by name"""
+	for sink in pactl.sink_list():
+		logging.debug('getSinkByName: saw sink named {}'.format(sink.name))
+		if sink.name == name:
+			logging.debug('getSinkByName: found the sink required, {}'.format(sink.name))
+			return sink
+	
+	return None
+
+
+def getSourceByName(pactl, name):
+	"""Return a PulseAudio input source object, searching for it by name"""
+	for source in pactl.source_list():
+		logging.debug('getSourceByanem: saw source named {}'.format(source.name))
+		if source.name == name:
+			logging.debug('getSourceByName: found the source required, {}'.format(source.name))
+			return source
+	
+	return None
+
+
+def setLed(port, led, value):
+	"""Set any LED on the nanoKONTROL2"""
+	logging.debug('setLed: led={}, value={}'.format(led, value))
+	port.send(mido.Message('control_change', control=led, value=value))
+
+
+def setAllLeds(port, value):
+	"""Set all LEDs on the nanoKONTROL2"""
+	for led in range(32, 72):
+		setLed(port, led, value)
+
+
+def showNotification(message):
+	"""Show a notification message, pause, then clear the notification"""
+	logging.debug('Notification: {}'.format(message))
+	n = Notify.Notification.new('nanoKontroller', message)
+	n.show()
+	time.sleep(1.4)
+	n.close()
+	
+
+# Parse command line args, of which we only care about one - debug mode
+parser = argparse.ArgumentParser()
+parser.add_argument('--debug', action='store_true')
+args = parser.parse_args()
+
+# Setup logging
+if args.debug:
+	logging.basicConfig(format='%(asctime)-15s %(levelname)-8s %(message)s', level=logging.DEBUG)
+else:
+	logging.basicConfig(format='%(asctime)-15s %(levelname)-8s %(message)s', level=logging.INFO)
+	
+logging.debug('Initing notifications')
+Notify.init('NanoKontroller')
+	
+showNotification('Starting NanoKontroller')
+
+# Open the uinput object for sending fake keypresses
+ui = uinput.UInput()
+
+# Open the MIDI objects for the nanKONTROL2 device
+inport = mido.open_input('nanoKONTROL2 MIDI 1')
+outport = mido.open_output('nanoKONTROL2 MIDI 1')
+
+# Open PulseAudio for volume control
+pactl = Pulse('nanoKontroller')
+
+# Get the PulseAudio sinks and sources for the main audio device and the
+# headset device
+outputSink = getSinkByName(pactl, 'alsa_output.usb-0d8c_Generic_USB_Audio_Device-00.iec958-stereo')
+inputSink = getSinkByName(pactl, 'alsa_output.usb-Plantronics_SupraPlus_Wideband_USB-00.analog-stereo')
+inputSource = getSourceByName(pactl, 'alsa_input.usb-Plantronics_SupraPlus_Wideband_USB-00.analog-mono')
+
+# Set the current muted state. We're assuming that nanoKontroller will
+# start before anything is muted ...
+muted = 0
+inputMuted = 0
+
+# Print warnings if we couldn't open any of our PA sinks or sources
+if outputSink == None:
+	logging.error('Failed to open output sink')
+	showNotification('Failed to open output sink')
+
+if inputSink == None:
+	logging.error('Failed to open input sink')
+	showNotification('Failed to open input sink')
+
+if inputSource == None:
+	logging.error('Failed to open input source')
+	showNotification('Failed to open input source')
+
+# Flash the LEDs
+setAllLeds(outport, 127)
+time.sleep(0.2)
+setAllLeds(outport, 0)
+
+# Main loop - process MIDI messages from the nanoKONTROL2 device as
+# they arrive
+for msg in inport:
+	if msg.type == 'control_change':
+		
+		# Fake keyboard inputs for mapped buttons defined in keymap
+		if msg.control in keymap.keys():
+			logging.debug('Handling control message for key {}, value {}'.format(msg.control, msg.value))
+			ui.write(e.EV_KEY, keymap[msg.control], msg.value/126)
+			setLed(outport, msg.control, msg.value)
+			ui.syn()
+		
+		# Set the volume of the speaker
+		elif msg.control == 0:
+			logging.debug('Handling speaker volume control event, value {}'.format(msg.value))
+			pactl.volume_set_all_chans(outputSink, (msg.value / 127.0))
+		
+		# Set the volume of the headset. Note that this can exceed 100%
+		# so that PA will amplify the incoming audio of quiet VoIP
+		# calls (msg.value is in the range 0-127, so dividing by 85
+		# means max volume will actually be 150%)
+		elif msg.control == 1:
+			logging.debug('Handling headset volume control event, value {}'.format(msg.value))
+			if inputSink != None:
+				pactl.volume_set_all_chans(inputSink, (msg.value / 85.0))
+		
+		# Handle the speaker mute control
+		elif msg.control == 48:
+			if msg.value == 127:
+				logging.debug('Handling speaker volume mute toggle')
+				if muted == 0:
+					muted = 1
+				else:
+					muted = 0
+				if outputSink != None:
+					pactl.mute(outputSink, muted)
+				setLed(outport, msg.control, muted * 127)
+		
+		# Handle the headset mute control which affects the microphone,
+		# rather than the audio
+		elif msg.control == 49:
+			if msg.value == 127:
+				logging.debug('Handling headset volume mute toggle')
+				if inputMuted == 0:
+					inputMuted = 1
+				else:
+					inputMuted = 0
+				if inputSource != None:
+					pactl.mute(inputSource, inputMuted)
+				setLed(outport, msg.control, inputMuted * 127)
+		
+		# Other inputs end up here - all other buttons, sliders and
+		# dials will log their control ID and value
+		else:
+			logging.debug('Unhandled control change: {}'.format(msg))
+	else:
+		logging.debug('Unhandled message: {}'.format(msg))
+

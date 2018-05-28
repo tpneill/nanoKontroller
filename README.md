@@ -20,4 +20,3 @@ Requires
 * PulseAudio for audio control
 * MIDO for MIDI control
 * evdev for keyboard events
-* GObject for notification messages

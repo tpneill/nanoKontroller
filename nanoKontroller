@@ -4,19 +4,127 @@ import argparse
 import time
 import mido
 import logging
+from enum import Enum
 from evdev import uinput, ecodes as e
 from pulsectl import Pulse
-from gi.repository import Notify
+
+class nano_keys(Enum):
+	TRACK_PREV = 58
+	TRACK_NEXT = 59
+	CYCLE = 46
+	MARKER_SET = 60
+	MARKER_PREV = 61
+	MARKER_NEXT = 62
+	PREV = 43
+	NEXT = 44
+	STOP = 42
+	PLAY = 41
+	RECORD = 45
+	PARAM1_SOLO = 32
+	PARAM2_SOLO = 33
+	PARAM3_SOLO = 34
+	PARAM4_SOLO = 35
+	PARAM5_SOLO = 36
+	PARAM6_SOLO = 37
+	PARAM7_SOLO = 38
+	PARAM8_SOLO = 39
+	PARAM1_MUTE = 48
+	PARAM2_MUTE = 49
+	PARAM3_MUTE = 50
+	PARAM4_MUTE = 51
+	PARAM5_MUTE = 52
+	PARAM6_MUTE = 53
+	PARAM7_MUTE = 54
+	PARAM8_MUTE = 55
+	PARAM1_RECORD = 64
+	PARAM2_RECORD = 65
+	PARAM3_RECORD = 66
+	PARAM4_RECORD = 67
+	PARAM5_RECORD = 68
+	PARAM6_RECORD = 69
+	PARAM7_RECORD = 70
+	PARAM8_RECORD = 71
+	PARAM1_SLIDER = 0
+	PARAM2_SLIDER = 1
+	PARAM3_SLIDER = 2
+	PARAM4_SLIDER = 3
+	PARAM5_SLIDER = 4
+	PARAM6_SLIDER = 5
+	PARAM7_SLIDER = 6
+	PARAM8_SLIDER = 7
+	PARAM1_KNOB = 16
+	PARAM2_KNOB = 17
+	PARAM3_KNOB = 18
+	PARAM4_KNOB = 19
+	PARAM5_KNOB = 20
+	PARAM6_KNOB = 21
+	PARAM7_KNOB = 22
+	PARAM8_KNOB = 23
+	
+	led_support = [
+		TRACK_PREV,
+		TRACK_NEXT,
+		CYCLE,
+		MARKER_SET,
+		MARKER_PREV,
+		MARKER_NEXT,
+		PREV,
+		NEXT,
+		STOP,
+		PLAY,
+		RECORD,
+		PARAM1_SOLO,
+		PARAM2_SOLO,
+		PARAM3_SOLO,
+		PARAM4_SOLO,
+		PARAM5_SOLO,
+		PARAM6_SOLO,
+		PARAM7_SOLO,
+		PARAM8_SOLO,
+		PARAM1_MUTE,
+		PARAM2_MUTE,
+		PARAM3_MUTE,
+		PARAM4_MUTE,
+		PARAM5_MUTE,
+		PARAM6_MUTE,
+		PARAM7_MUTE,
+		PARAM8_MUTE,
+		PARAM1_RECORD,
+		PARAM2_RECORD,
+		PARAM3_RECORD,
+		PARAM4_RECORD,
+		PARAM5_RECORD,
+		PARAM6_RECORD,
+		PARAM7_RECORD,
+		PARAM8_RECORD		
+	]
 
 # Prefined direct button to keyboard mappings
-keymap = {
-	41: e.KEY_PLAYPAUSE,
-	43: e.KEY_PREVIOUSSONG,
-	44: e.KEY_NEXTSONG,
-	42: e.KEY_STOPCD,
-	45: e.KEY_RECORD
-}
+default_keymap = [
+	["PLAY", "KEY_PLAYPAUSE"],
+	["PREV", "KEY_PREVIOUSSONG"],
+	["NEXT", "KEY_NEXTSONG"],
+	["STOP", "KEY_STOPCD"],
+	["RECORD", "KEY_RECORD"]
+]
 
+
+def generate_keymap(key_config):
+	"""Generate a key mapping from the supplied config
+	
+	key_config should be a list nanoKONTROL2 keys and evdev events they
+	should map to directly.
+	"""
+	
+	keymap = {}
+	
+	for key_to_map in key_config:
+		try:
+			keymap[nano_keys[key_to_map[0]].value] = e.ecodes[key_to_map[1]]
+		except:
+			logging.error('generate_keymap: Failed to map key {} to {}'.format(key_to_map[0], key_to_map[1]))
+	
+	return keymap
 
 def getSinkByName(pactl, name):
 	"""Return a PulseAudio output sink object, searching for it by name"""
@@ -51,14 +159,6 @@ def setAllLeds(port, value):
 	for led in range(32, 72):
 		setLed(port, led, value)
 
-
-def showNotification(message):
-	"""Show a notification message, pause, then clear the notification"""
-	logging.debug('Notification: {}'.format(message))
-	n = Notify.Notification.new('nanoKontroller', message)
-	n.show()
-	time.sleep(1.4)
-	n.close()
 	
 
 # Parse command line args, of which we only care about one - debug mode
@@ -72,10 +172,10 @@ if args.debug:
 else:
 	logging.basicConfig(format='%(asctime)-15s %(levelname)-8s %(message)s', level=logging.INFO)
 	
-logging.debug('Initing notifications')
-Notify.init('NanoKontroller')
-	
-showNotification('Starting NanoKontroller')
+logging.debug('Starting up')
+
+# Generate the keymap for simple button mappings
+keymap = generate_keymap(default_keymap)
 
 # Open the uinput object for sending fake keypresses
 ui = uinput.UInput()
@@ -101,25 +201,21 @@ inputMuted = 0
 # Print warnings if we couldn't open any of our PA sinks or sources
 if outputSink == None:
 	logging.error('Failed to open output sink')
-	showNotification('Failed to open output sink')
 
 if inputSink == None:
 	logging.error('Failed to open input sink')
-	showNotification('Failed to open input sink')
 
 if inputSource == None:
 	logging.error('Failed to open input source')
-	showNotification('Failed to open input source')
 
-# Flash the LEDs
-setAllLeds(outport, 127)
-time.sleep(0.2)
+# Reset all LEDs
 setAllLeds(outport, 0)
 
 # Main loop - process MIDI messages from the nanoKONTROL2 device as
 # they arrive
 for msg in inport:
 	if msg.type == 'control_change':
+		logging.debug('Control change message for key {}, value {}'.format(msg.control, msg.value))
 		
 		# Fake keyboard inputs for mapped buttons defined in keymap
 		if msg.control in keymap.keys():

@@ -1,9 +1,12 @@
 #!/usr/bin/python
 
 import argparse
-import time
 import mido
 import logging
+import ConfigParser
+import subprocess
+import sys
+from os.path import expanduser
 from enum import Enum
 from evdev import uinput, ecodes as e
 from pulsectl import Pulse
@@ -99,72 +102,174 @@ class nano_keys(Enum):
 		PARAM8_RECORD		
 	]
 
-# Prefined direct button to keyboard mappings
-default_keymap = [
-	["PLAY", "KEY_PLAYPAUSE"],
-	["PREV", "KEY_PREVIOUSSONG"],
-	["NEXT", "KEY_NEXTSONG"],
-	["STOP", "KEY_STOPCD"],
-	["RECORD", "KEY_RECORD"]
-]
+
+class nano_led_handler(object):
+	def __init__(self, port=None):
+		self.port = port
+	
+	def set_led(self, led=None, value=None):
+		if led in nano_keys.led_support.value:
+			logging.debug('nano_led_handler::set: Setting led {} to {}'.format(led, value))
+			if value > 0:
+				value = 127
+			else:
+				value = 0
+			self.port.send(mido.Message('control_change', control=led, value=value))
+		else:
+			logging.debug('nano_led_handler::set: Key {} has no led to set'.format(led))
 
 
-def generate_keymap(key_config):
-	"""Generate a key mapping from the supplied config
+class nano_action(object):
+	def __init__(self):
+		logging.error('nano_action::__init__: Not implemented!')
 	
-	key_config should be a list nanoKONTROL2 keys and evdev events they
-	should map to directly.
-	"""
-	
-	keymap = {}
-	
-	for key_to_map in key_config:
-		try:
-			keymap[nano_keys[key_to_map[0]].value] = e.ecodes[key_to_map[1]]
-		except:
-			logging.error('generate_keymap: Failed to map key {} to {}'.format(key_to_map[0], key_to_map[1]))
-	
-	return keymap
+	def action(self, key=None, value=None):
+		logging.error('nano_action::action: Not implemented!')
 
-def getSinkByName(pactl, name):
-	"""Return a PulseAudio output sink object, searching for it by name"""
+
+class nano_action_evdev(nano_action):
+	def __init__(self, evdev_action=None, uinput=None, led_handler=None):
+		self.evdev_action = evdev_action
+		self.uinput = uinput
+		self.led_handler = led_handler
+
+	def action(self, key=None, value=None):
+		logging.debug('nano_action_evdev::action: Keypress {} value {} triggering event {}'.format(key, value, self.evdev_action))
+		self.uinput.write(e.EV_KEY, self.evdev_action, value/126)
+		self.led_handler.set_led(led=key, value=value)
+		self.uinput.syn()		
+
+
+class nano_action_mute(nano_action):
+	def __init__(self, audio_device=None, pactl=None, led_handler=None):
+		self.audio_device = audio_device
+		self.pactl = pactl
+		self.muted = audio_device.mute # Would be nice if we could set the LED appropriately too
+		self.led_handler = led_handler
+	
+	def action(self, key=None, value=None):
+		if value == 127:
+			logging.debug('nano_action_mute::action: Value {} for {}'.format(value, self.audio_device.name))
+			if self.muted == 0:
+				self.muted = 1
+			else:
+				self.muted = 0
+			self.led_handler.set_led(led=key, value=self.muted)
+			self.pactl.mute(self.audio_device, self.muted)
+
+
+class nano_action_volume(nano_action):
+	def __init__(self, audio_device=None, pactl=None, max_level=100):
+		self.audio_device = audio_device
+		self.pactl = pactl
+		self.max_level = max_level # Allow volume > 100%
+	
+	def action(self, key=None, value=None):
+		logging.debug('nano_action_volume::action: Value {} for {}'.format(value, self.audio_device.name))
+		self.pactl.volume_set_all_chans(self.audio_device, ((float(msg.value) / 127.0) * (float(self.max_level) / 100.0)))
+
+
+class nano_action_exec(nano_action):
+	def __init__(self, command=None):
+		self.command = command
+	
+	def action(self, key=None, value=None):
+		filled_command = self.command.format(NK_KEY_ID = key, NK_KEY_VALUE = value)
+		logging.debug('nano_action_exec::action: Executing {}'.format(filled_command))
+		subprocess.call(filled_command, shell=True)
+
+
+def get_audio_devices(pactl, sources={}, sinks={}):
+	audio_devices = {}
+	
 	for sink in pactl.sink_list():
-		logging.debug('getSinkByName: saw sink named {}'.format(sink.name))
-		if sink.name == name:
-			logging.debug('getSinkByName: found the sink required, {}'.format(sink.name))
-			return sink
+		if sink.name in sinks.keys():
+			logging.debug('get_audio_devices: Found sink {} at {}'.format(sinks[sink.name], sink.name))
+			audio_devices[sinks[sink.name]] = sink
 	
-	return None
-
-
-def getSourceByName(pactl, name):
-	"""Return a PulseAudio input source object, searching for it by name"""
 	for source in pactl.source_list():
-		logging.debug('getSourceByanem: saw source named {}'.format(source.name))
-		if source.name == name:
-			logging.debug('getSourceByName: found the source required, {}'.format(source.name))
-			return source
+		if source.name in sources.keys():
+			logging.debug('get_audio_devices: Found source {} at {}'.format(sources[source.name], source.name))
+			audio_devices[sources[source.name]] = source
 	
-	return None
-
-
-def setLed(port, led, value):
-	"""Set any LED on the nanoKONTROL2"""
-	logging.debug('setLed: led={}, value={}'.format(led, value))
-	port.send(mido.Message('control_change', control=led, value=value))
-
-
-def setAllLeds(port, value):
-	"""Set all LEDs on the nanoKONTROL2"""
-	for led in range(32, 72):
-		setLed(port, led, value)
-
+	return audio_devices
 	
+
+def parse_config(config_path, pactl, evdev, uinput, midi_out):
+	action_map = {}
+	led_handler = nano_led_handler(port=midi_out)
+	
+	config_object = ConfigParser.ConfigParser()
+	config_object.optionxform = str # Need case sensitivity
+	
+	if len(config_object.read(config_path)) == 0:
+		logging.error('parse_config: Failed to load config file {}'.format(config_path))
+		return None
+	
+	if 'keymap' not in config_object.sections():
+		logging.error('parse_config: Config has no keymap section')
+		return None
+	
+	sources = {}
+	if 'audioinputs' in config_object.sections():
+		for source_alias in config_object.options('audioinputs'):
+			sources[config_object.get('audioinputs', source_alias)] = source_alias
+	
+	sinks = {}
+	if 'audiooutputs' in config_object.sections():
+		for sink_alias in config_object.options('audiooutputs'):
+			sinks[config_object.get('audiooutputs', sink_alias)] = sink_alias
+	
+	# Get PulseAudio objects for all sinks and sources
+	audio_devices = get_audio_devices(pactl, sources=sources, sinks=sinks)
+	
+	# Create action objects for each key
+	for keyname in config_object.options('keymap'):
+		try:
+			keycode = nano_keys[keyname].value
+		except:
+			logging.warn('parse_config: No such key {}'.format(keyname))
+			continue
+		
+		actions = config_object.get('keymap', keyname).split('/', 1)
+		
+		if len(actions) == 1:
+			# Basic evdev key mapping
+			action_map[keycode] = nano_action_evdev(evdev_action=evdev.ecodes[actions[0]], uinput=uinput, led_handler=led_handler)
+		
+		else:
+			if actions[0] == 'mute':
+				# Toggle mute of audio device
+				action_map[keycode] = nano_action_mute(audio_device=audio_devices[actions[1]], pactl=pactl, led_handler=led_handler)
+			
+			elif actions[0] == 'volume':
+				# Change volume of audio device
+				volume_details = actions[1].split('/', 1)
+				
+				if len(volume_details) == 1:
+					# No max volume override
+					action_map[keycode] = nano_action_volume(audio_device=audio_devices[volume_details[0]], pactl=pactl)
+				else:
+					# Max volume override
+					action_map[keycode] = nano_action_volume(audio_device=audio_devices[volume_details[0]], pactl=pactl, max_level=float(volume_details[1]))
+			
+			elif actions[0] == 'exec':
+				# Execute a command
+				action_map[keycode] = nano_action_exec(command=actions[1])
+	
+	return action_map
+		
+
+
+
 
 # Parse command line args, of which we only care about one - debug mode
 parser = argparse.ArgumentParser()
-parser.add_argument('--debug', action='store_true')
+parser.add_argument('-d', '--debug', action='store_true', help='Enable debug output')
+parser.add_argument('-c', '--config', default=expanduser('~/.config/nanoKontroller.ini'), help='Path to config file')
+parser.add_argument('-l', '--list-devices', action='store_true', help='List all PulseAudio devices')
 args = parser.parse_args()
+
 
 # Setup logging
 if args.debug:
@@ -174,9 +279,18 @@ else:
 	
 logging.debug('Starting up')
 
-# Generate the keymap for simple button mappings
-keymap = generate_keymap(default_keymap)
+# Open PulseAudio for volume control
+logging.debug('Opening PulseAudio')
+pactl = Pulse('nanoKontroller')
 
+# It the user just wanted a list of PA devices, dump them and move on
+if args.list_devices:
+	for device in pactl.sink_list():
+		print 'output: {}'.format(device.name)
+	for device in pactl.source_list():
+		print 'input: {}'.format(device.name)
+	sys.exit(0)
+	
 # Open the uinput object for sending fake keypresses
 ui = uinput.UInput()
 
@@ -184,89 +298,14 @@ ui = uinput.UInput()
 inport = mido.open_input('nanoKONTROL2 MIDI 1')
 outport = mido.open_output('nanoKONTROL2 MIDI 1')
 
-# Open PulseAudio for volume control
-pactl = Pulse('nanoKontroller')
+# Get config
+logging.debug('Trying to load config from {}'.format(args.config))
+action_map = parse_config(args.config, pactl, e, ui, outport)
 
-# Get the PulseAudio sinks and sources for the main audio device and the
-# headset device
-outputSink = getSinkByName(pactl, 'alsa_output.usb-0d8c_Generic_USB_Audio_Device-00.iec958-stereo')
-inputSink = getSinkByName(pactl, 'alsa_output.usb-Plantronics_SupraPlus_Wideband_USB-00.analog-stereo')
-inputSource = getSourceByName(pactl, 'alsa_input.usb-Plantronics_SupraPlus_Wideband_USB-00.analog-mono')
-
-# Set the current muted state. We're assuming that nanoKontroller will
-# start before anything is muted ...
-muted = 0
-inputMuted = 0
-
-# Print warnings if we couldn't open any of our PA sinks or sources
-if outputSink == None:
-	logging.error('Failed to open output sink')
-
-if inputSink == None:
-	logging.error('Failed to open input sink')
-
-if inputSource == None:
-	logging.error('Failed to open input source')
-
-# Reset all LEDs
-setAllLeds(outport, 0)
-
-# Main loop - process MIDI messages from the nanoKONTROL2 device as
-# they arrive
+# Main loop
 for msg in inport:
 	if msg.type == 'control_change':
-		logging.debug('Control change message for key {}, value {}'.format(msg.control, msg.value))
-		
-		# Fake keyboard inputs for mapped buttons defined in keymap
-		if msg.control in keymap.keys():
-			logging.debug('Handling control message for key {}, value {}'.format(msg.control, msg.value))
-			ui.write(e.EV_KEY, keymap[msg.control], msg.value/126)
-			setLed(outport, msg.control, msg.value)
-			ui.syn()
-		
-		# Set the volume of the speaker
-		elif msg.control == 0:
-			logging.debug('Handling speaker volume control event, value {}'.format(msg.value))
-			pactl.volume_set_all_chans(outputSink, (msg.value / 127.0))
-		
-		# Set the volume of the headset. Note that this can exceed 100%
-		# so that PA will amplify the incoming audio of quiet VoIP
-		# calls (msg.value is in the range 0-127, so dividing by 85
-		# means max volume will actually be 150%)
-		elif msg.control == 1:
-			logging.debug('Handling headset volume control event, value {}'.format(msg.value))
-			if inputSink != None:
-				pactl.volume_set_all_chans(inputSink, (msg.value / 85.0))
-		
-		# Handle the speaker mute control
-		elif msg.control == 48:
-			if msg.value == 127:
-				logging.debug('Handling speaker volume mute toggle')
-				if muted == 0:
-					muted = 1
-				else:
-					muted = 0
-				if outputSink != None:
-					pactl.mute(outputSink, muted)
-				setLed(outport, msg.control, muted * 127)
-		
-		# Handle the headset mute control which affects the microphone,
-		# rather than the audio
-		elif msg.control == 49:
-			if msg.value == 127:
-				logging.debug('Handling headset volume mute toggle')
-				if inputMuted == 0:
-					inputMuted = 1
-				else:
-					inputMuted = 0
-				if inputSource != None:
-					pactl.mute(inputSource, inputMuted)
-				setLed(outport, msg.control, inputMuted * 127)
-		
-		# Other inputs end up here - all other buttons, sliders and
-		# dials will log their control ID and value
-		else:
-			logging.debug('Unhandled control change: {}'.format(msg))
-	else:
-		logging.debug('Unhandled message: {}'.format(msg))
+		logging.debug('Keypress {} value {}'.format(msg.control, msg.value))
+		if msg.control in action_map.keys():
+			action_map[msg.control].action(key=msg.control, value=msg.value)
 

@@ -235,7 +235,13 @@ def parse_config(config_path, pactl, evdev, uinput, midi_out):
 		
 		if len(actions) == 1:
 			# Basic evdev key mapping
-			action_map[keycode] = nano_action_evdev(evdev_action=evdev.ecodes[actions[0]], uinput=uinput, led_handler=led_handler)
+			try:
+				evdev_action = evdev.ecodes[actions[0]]
+			except:
+				logging.warning('parse_config: Unknown evdev key {}'.format(actions[0]))
+				continue
+				
+			action_map[keycode] = nano_action_evdev(evdev_action=evdev_action, uinput=uinput, led_handler=led_handler)
 		
 		else:
 			if actions[0] == 'mute':
@@ -256,6 +262,9 @@ def parse_config(config_path, pactl, evdev, uinput, midi_out):
 			elif actions[0] == 'exec':
 				# Execute a command
 				action_map[keycode] = nano_action_exec(command=actions[1])
+			
+			else:
+				logging.warning('Unknown action {}'.format(config_object.get('keymap', keyname)))
 	
 	return action_map
 		

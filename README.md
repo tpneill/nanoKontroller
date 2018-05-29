@@ -24,7 +24,7 @@ Requires
 
 Config
 ======
-By default config should be in ```~/.config/nanoKontroller.ini``` but this can be overridden by the ```-c/--config``` command line argument.
+By default config should be in ```~/.config/nanoKontroller.ini``` but this can be overridden by the ```-c```/```--config``` command line argument.
 
 The ```[audioinputs]``` section defines audio devices to use as inputs, such as headsets or microphones. Similarly, ```[audiooutputs]``` defines audio devices to use as outputs, such as headsets or speakers. To help finding these names there is a ```--list-devices``` command line option to print them to the console.
 

@@ -1,9 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import argparse
 import mido
 import logging
-import ConfigParser
+import configparser
 import subprocess
 import sys
 from os.path import expanduser
@@ -135,7 +135,7 @@ class nano_action_evdev(nano_action):
 
 	def action(self, key=None, value=None):
 		logging.debug('nano_action_evdev::action: Keypress {} value {} triggering event {}'.format(key, value, self.evdev_action))
-		self.uinput.write(e.EV_KEY, self.evdev_action, value/126)
+		self.uinput.write(e.EV_KEY, self.evdev_action, int(value/126))
 		self.led_handler.set_led(led=key, value=value)
 		self.uinput.syn()		
 
@@ -199,7 +199,7 @@ def parse_config(config_path, pactl, evdev, uinput, midi_out):
 	action_map = {}
 	led_handler = nano_led_handler(port=midi_out)
 	
-	config_object = ConfigParser.ConfigParser()
+	config_object = configparser.ConfigParser()
 	config_object.optionxform = str # Need case sensitivity
 	
 	if len(config_object.read(config_path)) == 0:
@@ -295,9 +295,9 @@ pactl = Pulse('nanoKontroller')
 # It the user just wanted a list of PA devices, dump them and move on
 if args.list_devices:
 	for device in pactl.sink_list():
-		print 'output: {}'.format(device.name)
+		print('output: {}'.format(device.name))
 	for device in pactl.source_list():
-		print 'input: {}'.format(device.name)
+		print('input: {}'.format(device.name))
 	sys.exit(0)
 	
 # Open the uinput object for sending fake keypresses
@@ -317,4 +317,6 @@ for msg in inport:
 		logging.debug('Keypress {} value {}'.format(msg.control, msg.value))
 		if msg.control in action_map.keys():
 			action_map[msg.control].action(key=msg.control, value=msg.value)
+	else:
+		logging.debug('Got other message, type {}'.format(msg.type))
 
